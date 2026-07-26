@@ -337,26 +337,10 @@ class _PaintScreenState extends State<PaintScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Column(
+      body: Stack(
         children: [
-          PaintToolbar(
-            currentColor: _currentColor,
-            strokeWidth: _strokeWidth,
-            onColorChanged: (color) {
-              setState(() => _currentColor = color);
-            },
-            onStrokeWidthChanged: (width) {
-              setState(() => _strokeWidth = width);
-            },
-            onUndo: _onUndo,
-            onClear: _onClear,
-            onSave: _onSave,
-            onLoad: _onLoad,
-            onExport: _onExport,
-            movieMode: _movieMode,
-            onToggleMovieMode: _toggleMovieMode,
-          ),
-          Expanded(
+          // Canvas fills the entire body — behind all panels.
+          Positioned.fill(
             child: RepaintBoundary(
               key: _canvasRepaintKey,
               child: PaintCanvas(
@@ -366,13 +350,42 @@ class _PaintScreenState extends State<PaintScreen> {
               ),
             ),
           ),
+          // Toolbar floats on top of the canvas.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: PaintToolbar(
+              currentColor: _currentColor,
+              strokeWidth: _strokeWidth,
+              onColorChanged: (color) {
+                setState(() => _currentColor = color);
+              },
+              onStrokeWidthChanged: (width) {
+                setState(() => _strokeWidth = width);
+              },
+              onUndo: _onUndo,
+              onClear: _onClear,
+              onSave: _onSave,
+              onLoad: _onLoad,
+              onExport: _onExport,
+              movieMode: _movieMode,
+              onToggleMovieMode: _toggleMovieMode,
+            ),
+          ),
+          // Timeline floats at the bottom.
           if (_movieMode)
-            MovieTimeline(
-              controller: _movieController,
-              onAddFrame: _onAddFrame,
-              onRemoveFrame: _onRemoveFrame,
-              onFrameSelected: _onSelectFrame,
-              onPlayPause: _onPlayPause,
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: MovieTimeline(
+                controller: _movieController,
+                onAddFrame: _onAddFrame,
+                onRemoveFrame: _onRemoveFrame,
+                onFrameSelected: _onSelectFrame,
+                onPlayPause: _onPlayPause,
+              ),
             ),
         ],
       ),
