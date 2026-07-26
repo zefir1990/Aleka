@@ -14,6 +14,11 @@ A cross-platform paint application built with [Flutter](https://flutter.dev). Dr
 - **Save** — persist your drawing as a `.aleka` file (JSON-based format)
 - **Load** — open a `.aleka` file and continue drawing
 - **Export as PNG** — capture the canvas at 3× resolution and download as a PNG image
+- **🎬 Movie mode** — create frame-by-frame animations with an interactive timeline:
+  - Add and remove frames, each holding their own drawing
+  - Per-frame display duration (50 ms – 5 s)
+  - Adjustable framerate (6, 8, 12, 15, 24, 30, or 60 FPS)
+  - Export as **MP4 video** while in movie mode (requires ffmpeg on desktop; uses ffmpeg.wasm on web)
 - **Light & dark theme** — follows your system preference via Material 3
 
 ## Supported platforms
@@ -61,7 +66,7 @@ flutter run
 ### Run tests
 
 ```bash
-# All tests (widget + unit — 39 tests)
+# All tests (widget + unit — 79 tests)
 flutter test
 
 # Code analysis
@@ -97,13 +102,21 @@ A `.aleka` file is a human-readable JSON document:
 
 ```
 lib/
-├── main.dart          # App entry point, theme, PaintScreen with I/O wiring
-├── paint_canvas.dart  # Stroke model, PaintCanvasController, CustomPainter
-├── toolbar.dart       # Color palette, brush slider, action buttons
-└── aleka_file.dart    # .aleka serialization, PNG capture, file I/O
+├── main.dart             # App entry point, theme, PaintScreen with I/O wiring
+├── paint_canvas.dart     # Stroke model, PaintCanvasController, CustomPainter
+├── toolbar.dart          # Color palette, brush slider, action buttons
+├── aleka_file.dart       # .aleka serialization, PNG capture, file I/O
+├── movie_controller.dart # Frame model, MovieController for animation state
+├── movie_timeline.dart   # Timeline widget with frame thumbnails & controls
+├── video_export.dart     # MP4 video encoder (ffmpeg desktop / ffmpeg.wasm web)
+├── video_export_web.dart # Web-specific MP4 export via ffmpeg.wasm
+├── video_export_stub.dart# Non-web video export stub
+├── web_download_web.dart # Web-specific file download (dart:html)
+└── web_download_stub.dart# Non-web download stub
 test/
-└── widget_test.dart   # 39 tests: serialization, drawing, color picking,
-                       #   undo, clear, save/load round-trip, PNG export
+└── widget_test.dart      # 79 tests: serialization, drawing, color picking,
+                          #   undo, clear, save/load round-trip, PNG/video export,
+                          #   Frame model, MovieController, timeline, movie mode
 ```
 
 ## License

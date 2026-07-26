@@ -164,3 +164,28 @@ Future<bool> savePngToFile(Uint8List bytes) async {
     return false;
   }
 }
+
+/// Prompts the user to save video [bytes] to a file.
+///
+/// Returns `true` on success, `false` if cancelled or errored.
+Future<bool> saveVideoToFile(Uint8List bytes) async {
+  const fileName = 'animation.mp4';
+
+  try {
+    if (kIsWeb) {
+      return await downloadBytes(fileName, bytes);
+    } else {
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export video',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['mp4'],
+      );
+      if (path == null) return false;
+      await io.File(path).writeAsBytes(bytes);
+      return true;
+    }
+  } catch (_) {
+    return false;
+  }
+}

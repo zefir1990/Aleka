@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 /// The color palette available in the toolbar.
 const List<Color> _paletteColors = [
@@ -30,6 +31,8 @@ class PaintToolbar extends StatelessWidget {
   final VoidCallback onSave;
   final VoidCallback onLoad;
   final VoidCallback onExport;
+  final bool movieMode;
+  final VoidCallback onToggleMovieMode;
 
   const PaintToolbar({
     super.key,
@@ -42,7 +45,46 @@ class PaintToolbar extends StatelessWidget {
     required this.onSave,
     required this.onLoad,
     required this.onExport,
+    this.movieMode = false,
+    this.onToggleMovieMode = _noop,
   });
+
+  static void _noop() {}
+
+  bool _isCustomColor() => !_paletteColors.contains(currentColor);
+
+  void _showColorPicker(BuildContext context) {
+    Color pickedColor = currentColor;
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Pick a color'),
+          content: SingleChildScrollView(
+            child: ColorPicker(
+              pickerColor: currentColor,
+              onColorChanged: (color) => pickedColor = color,
+              enableAlpha: false,
+              labelTypes: const [],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                onColorChanged(pickedColor);
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Select'),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -60,40 +102,86 @@ class PaintToolbar extends StatelessWidget {
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
-                  children: _paletteColors.map((color) {
-                    final isSelected = color == currentColor;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                  children: [
+                    ..._paletteColors.map((color) {
+                      final isSelected = color == currentColor;
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: GestureDetector(
+                          onTap: () => onColorChanged(color),
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isSelected
+                                    ? (isDark ? Colors.white : Colors.black87)
+                                    : (isDark
+                                        ? Colors.white24
+                                        : Colors.black26),
+                                width: isSelected ? 3 : 1,
+                              ),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: color.withValues(alpha: 0.5),
+                                        blurRadius: 6,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                    // Color picker button — highlighted when current color
+                    // is not a preset (i.e. was chosen via the picker).
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
                       child: GestureDetector(
-                        onTap: () => onColorChanged(color),
+                        onTap: () => _showColorPicker(context),
                         child: Container(
                           width: 32,
                           height: 32,
                           decoration: BoxDecoration(
-                            color: color,
                             shape: BoxShape.circle,
                             border: Border.all(
-                              color: isSelected
+                              color: _isCustomColor()
                                   ? (isDark ? Colors.white : Colors.black87)
-                                  : (isDark
-                                      ? Colors.white24
-                                      : Colors.black26),
-                              width: isSelected ? 3 : 1,
+                                  : (isDark ? Colors.white38 : Colors.black38),
+                              width: _isCustomColor() ? 3 : 1.5,
                             ),
-                            boxShadow: isSelected
+                            gradient: const SweepGradient(
+                              colors: [
+                                Colors.red,
+                                Colors.yellow,
+                                Colors.green,
+                                Colors.cyan,
+                                Colors.blue,
+                                Colors.purple,
+                                Colors.red,
+                              ],
+                            ),
+                            boxShadow: _isCustomColor()
                                 ? [
                                     BoxShadow(
-                                      color: color.withValues(alpha: 0.5),
+                                      color: currentColor.withValues(alpha: 0.5),
                                       blurRadius: 6,
                                       spreadRadius: 1,
                                     ),
                                   ]
                                 : null,
                           ),
+                          child: const Center(
+                            child: Icon(Icons.add, size: 18, color: Colors.white),
+                          ),
                         ),
                       ),
-                    );
-                  }).toList(),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -156,10 +244,24 @@ class PaintToolbar extends StatelessWidget {
               onPressed: onLoad,
             ),
 
-            // Export PNG
+            const VerticalDivider(width: 20),
+
+            // Movie mode toggle
             IconButton(
-              icon: const Icon(Icons.image),
-              tooltip: 'Export as PNG',
+              icon: Icon(
+                Icons.movie,
+                color: movieMode
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+              tooltip: movieMode ? 'Exit movie mode' : 'Movie mode',
+              onPressed: onToggleMovieMode,
+            ),
+
+            // Export (PNG in draw mode, video in movie mode)
+            IconButton(
+              icon: Icon(movieMode ? Icons.videocam : Icons.image),
+              tooltip: movieMode ? 'Export video' : 'Export as PNG',
               onPressed: onExport,
             ),
           ],
