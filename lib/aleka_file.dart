@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 import 'paint_canvas.dart';
+import 'web_download_stub.dart'
+    if (dart.library.html) 'web_download_web.dart';
 
 /// The header used to identify .aleka files.
 const _alekaMagic = 'aleka';
@@ -73,19 +75,7 @@ Future<bool> saveToFile(List<Stroke> strokes) async {
 
   try {
     if (kIsWeb) {
-      // On web, file_picker.saveFile() returns null path but triggers a
-      // browser download with the chosen file name. We need to write the
-      // bytes ourselves via a download approach.
-      final result = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save drawing as .aleka',
-        fileName: fileName,
-        bytes: bytes,
-        type: FileType.custom,
-        allowedExtensions: ['aleka'],
-      );
-      // saveFile returns null on cancel; non-null path on success
-      // (desktop/mobile), or downloads on web.
-      return result != null;
+      return await downloadBytes(fileName, bytes);
     } else {
       final path = await FilePicker.platform.saveFile(
         dialogTitle: 'Save drawing as .aleka',
@@ -158,14 +148,7 @@ Future<bool> savePngToFile(Uint8List bytes) async {
 
   try {
     if (kIsWeb) {
-      final result = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export as PNG',
-        fileName: fileName,
-        bytes: bytes,
-        type: FileType.custom,
-        allowedExtensions: ['png'],
-      );
-      return result != null;
+      return await downloadBytes(fileName, bytes);
     } else {
       final path = await FilePicker.platform.saveFile(
         dialogTitle: 'Export as PNG',
