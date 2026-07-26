@@ -89,6 +89,26 @@ class _PaintScreenState extends State<PaintScreen> {
   // setState triggered by frame selection).
   bool _loadingFrameStrokes = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _movieController.addListener(_onMovieControllerChanged);
+  }
+
+  @override
+  void dispose() {
+    _movieController.removeListener(_onMovieControllerChanged);
+    _movieController.dispose();
+    super.dispose();
+  }
+
+  /// Loads frame strokes onto the canvas when playback advances frames.
+  void _onMovieControllerChanged() {
+    if (_movieController.isPlaying && _movieController.hasCurrentFrame) {
+      _loadFrameToCanvas(_movieController.currentFrame!);
+    }
+  }
+
   void _onUndo() {
     _canvasController.undo();
     if (_movieMode) {
@@ -161,6 +181,9 @@ class _PaintScreenState extends State<PaintScreen> {
   }
 
   void _onSelectFrame(int index) {
+    // Pause playback if the user manually selects a frame.
+    if (_movieController.isPlaying) _movieController.pause();
+
     // Ignore if already on this frame.
     if (index == _movieController.currentFrameIndex) return;
 
@@ -171,6 +194,14 @@ class _PaintScreenState extends State<PaintScreen> {
     final frame = _movieController.currentFrame;
     if (frame != null) {
       _loadFrameToCanvas(frame);
+    }
+  }
+
+  void _onPlayPause() {
+    _movieController.togglePlayPause();
+    // If starting playback and there's a current frame, load it.
+    if (_movieController.isPlaying && _movieController.hasCurrentFrame) {
+      _loadFrameToCanvas(_movieController.currentFrame!);
     }
   }
 
@@ -341,6 +372,7 @@ class _PaintScreenState extends State<PaintScreen> {
               onAddFrame: _onAddFrame,
               onRemoveFrame: _onRemoveFrame,
               onFrameSelected: _onSelectFrame,
+              onPlayPause: _onPlayPause,
             ),
         ],
       ),

@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -1047,6 +1048,145 @@ void main() {
       controller.addFrame();
       expect(() => controller.frames.add(Frame(id: 'x')), throwsUnsupportedError);
     });
+
+    // -- Playback ----------------------------------------------------------
+
+    test('isPlaying starts false', () {
+      final controller = MovieController();
+      expect(controller.isPlaying, isFalse);
+    });
+
+    test('play does nothing with no frames', () {
+      final controller = MovieController();
+      controller.play();
+      expect(controller.isPlaying, isFalse);
+    });
+
+    test('play starts playback and sets isPlaying', () {
+      final controller = MovieController();
+      controller.addFrame();
+      controller.play();
+      expect(controller.isPlaying, isTrue);
+      controller.pause(); // Clean up timer.
+    });
+
+    test('pause stops playback', () {
+      final controller = MovieController();
+      controller.addFrame();
+      controller.play();
+      expect(controller.isPlaying, isTrue);
+      controller.pause();
+      expect(controller.isPlaying, isFalse);
+    });
+
+    test('togglePlayPause toggles between states', () {
+      final controller = MovieController();
+      controller.addFrame();
+      controller.togglePlayPause();
+      expect(controller.isPlaying, isTrue);
+      controller.togglePlayPause();
+      expect(controller.isPlaying, isFalse);
+    });
+
+    test('play advances to next frame', () {
+      final controller = MovieController();
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.selectFrame(0);
+      expect(controller.currentFrameIndex, 0);
+
+      final fake = FakeAsync();
+      fake.run((_) {
+        controller.play();
+        expect(controller.isPlaying, isTrue);
+        expect(controller.currentFrameIndex, 0);
+        // Advance past the first frame's duration.
+        fake.elapse(const Duration(milliseconds: 12));
+        expect(controller.currentFrameIndex, 1);
+        // Advance past the last frame's duration — should stop.
+        fake.elapse(const Duration(milliseconds: 10));
+        expect(controller.isPlaying, isFalse);
+        expect(controller.currentFrameIndex, 1);
+      });
+    });
+
+    test('dispose cancels playback', () {
+      final controller = MovieController();
+      controller.addFrame(duration: const Duration(milliseconds: 50));
+      controller.play();
+      expect(controller.isPlaying, isTrue);
+      controller.dispose();
+      // Timer is cancelled; isPlaying stays true (no notifyListeners on dispose).
+    });
+
+    // -- Looping ------------------------------------------------------------
+
+    test('looping starts false', () {
+      final controller = MovieController();
+      expect(controller.looping, isFalse);
+    });
+
+    test('setLooping enables and disables looping', () {
+      final controller = MovieController();
+      controller.setLooping(true);
+      expect(controller.looping, isTrue);
+      controller.setLooping(false);
+      expect(controller.looping, isFalse);
+    });
+
+    test('setLooping with same value does not notify', () {
+      final controller = MovieController();
+      var notified = false;
+      controller.addListener(() => notified = true);
+      notified = false;
+      controller.setLooping(false); // Already false.
+      expect(notified, isFalse);
+    });
+
+    test('playback loops to first frame when looping enabled', () {
+      final controller = MovieController();
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.selectFrame(0);
+      controller.setLooping(true);
+
+      final fake = FakeAsync();
+      fake.run((_) {
+        controller.play();
+        expect(controller.currentFrameIndex, 0);
+        // Advance past first frame (10 ms) → frame 1.
+        fake.elapse(const Duration(milliseconds: 12));
+        expect(controller.currentFrameIndex, 1);
+        // Advance past second frame (10 ms, total 22 ms) → frame 2.
+        fake.elapse(const Duration(milliseconds: 10));
+        expect(controller.currentFrameIndex, 2);
+        // Advance past third frame (10 ms, total 32 ms) → loops to frame 0.
+        fake.elapse(const Duration(milliseconds: 10));
+        expect(controller.currentFrameIndex, 0);
+        expect(controller.isPlaying, isTrue);
+        // Advance past frame 0 again (total 42 ms) → frame 1.
+        fake.elapse(const Duration(milliseconds: 10));
+        expect(controller.currentFrameIndex, 1);
+      });
+    });
+
+    test('playback stops at last frame when looping disabled', () {
+      final controller = MovieController();
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.addFrame(duration: const Duration(milliseconds: 10));
+      controller.selectFrame(0);
+
+      final fake = FakeAsync();
+      fake.run((_) {
+        controller.play();
+        fake.elapse(const Duration(milliseconds: 15));
+        expect(controller.currentFrameIndex, 1);
+        fake.elapse(const Duration(milliseconds: 15));
+        expect(controller.isPlaying, isFalse);
+        expect(controller.currentFrameIndex, 1);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1080,6 +1220,7 @@ void main() {
       VoidCallback? onAddFrame,
       VoidCallback? onRemoveFrame,
       ValueChanged<int>? onFrameSelected,
+      VoidCallback? onPlayPause,
     }) {
       return MaterialApp(
         home: Scaffold(
@@ -1088,6 +1229,7 @@ void main() {
             onAddFrame: onAddFrame ?? () {},
             onRemoveFrame: onRemoveFrame ?? () {},
             onFrameSelected: onFrameSelected ?? (_) {},
+            onPlayPause: onPlayPause ?? () {},
           ),
         ),
       );
@@ -1190,6 +1332,57 @@ void main() {
       await tester.pumpAndSettle();
       // The empty-state add button is an IconButton.filled with Icons.add.
       expect(find.byIcon(Icons.add), findsOneWidget);
+    });
+
+    testWidgets('shows play button when not playing', (tester) async {
+      final controller = MovieController();
+      controller.addFrame();
+      await tester.pumpWidget(wrapTimeline(controller));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.play_arrow), findsOneWidget);
+      expect(find.byIcon(Icons.pause), findsNothing);
+    });
+
+    testWidgets('shows pause button when playing', (tester) async {
+      final controller = MovieController();
+      controller.addFrame(duration: const Duration(seconds: 5));
+      await tester.pumpWidget(wrapTimeline(controller));
+      await tester.pumpAndSettle();
+
+      controller.play();
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.pause), findsOneWidget);
+      expect(find.byIcon(Icons.play_arrow), findsNothing);
+
+      controller.pause();
+    });
+
+    testWidgets('play/pause button triggers onPlayPause', (tester) async {
+      var toggled = false;
+      final controller = MovieController();
+      controller.addFrame();
+      await tester.pumpWidget(wrapTimeline(
+        controller,
+        onPlayPause: () => toggled = true,
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.play_arrow));
+      expect(toggled, isTrue);
+    });
+
+    testWidgets('loop button toggles looping', (tester) async {
+      final controller = MovieController();
+      controller.addFrame();
+      await tester.pumpWidget(wrapTimeline(controller));
+      await tester.pumpAndSettle();
+
+      expect(controller.looping, isFalse);
+      await tester.tap(find.byIcon(Icons.loop));
+      expect(controller.looping, isTrue);
+      await tester.tap(find.byIcon(Icons.loop));
+      expect(controller.looping, isFalse);
     });
   });
 

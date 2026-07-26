@@ -14,6 +14,7 @@ class MovieTimeline extends StatefulWidget {
   final VoidCallback onAddFrame;
   final VoidCallback onRemoveFrame;
   final ValueChanged<int> onFrameSelected;
+  final VoidCallback onPlayPause;
 
   const MovieTimeline({
     super.key,
@@ -21,6 +22,7 @@ class MovieTimeline extends StatefulWidget {
     required this.onAddFrame,
     required this.onRemoveFrame,
     required this.onFrameSelected,
+    required this.onPlayPause,
   });
 
   @override
@@ -130,6 +132,7 @@ class _MovieTimelineState extends State<MovieTimeline> {
                   controller: widget.controller,
                   onAddFrame: widget.onAddFrame,
                   onRemoveFrame: widget.onRemoveFrame,
+                  onPlayPause: widget.onPlayPause,
                 )
               else
                 Padding(
@@ -226,11 +229,13 @@ class _ControlsPanel extends StatelessWidget {
   final MovieController controller;
   final VoidCallback onAddFrame;
   final VoidCallback onRemoveFrame;
+  final VoidCallback onPlayPause;
 
   const _ControlsPanel({
     required this.controller,
     required this.onAddFrame,
     required this.onRemoveFrame,
+    required this.onPlayPause,
   });
 
   @override
@@ -238,12 +243,34 @@ class _ControlsPanel extends StatelessWidget {
     final theme = Theme.of(context);
     final frame = controller.currentFrame;
     final durationMs = frame?.displayDuration.inMilliseconds ?? 500;
+    final isPlaying = controller.isPlaying;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Play / pause button.
+          IconButton(
+            icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
+            tooltip: isPlaying ? 'Pause' : 'Play',
+            onPressed: onPlayPause,
+            iconSize: 22,
+          ),
+          // Loop toggle.
+          IconButton(
+            icon: Icon(
+              Icons.loop,
+              color: controller.looping
+                  ? theme.colorScheme.primary
+                  : null,
+            ),
+            tooltip: controller.looping ? 'Looping on' : 'Looping off',
+            onPressed: () => controller.setLooping(!controller.looping),
+            iconSize: 20,
+          ),
+          const SizedBox(width: 4),
+
           // Duration slider for current frame.
           Column(
             mainAxisAlignment: MainAxisAlignment.center,

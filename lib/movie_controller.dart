@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'paint_canvas.dart';
@@ -45,6 +47,9 @@ class MovieController extends ChangeNotifier {
   final List<Frame> _frames = [];
   int _currentFrameIndex = -1;
   double _fps = defaultFps;
+  bool _isPlaying = false;
+  bool _looping = false;
+  Timer? _playbackTimer;
 
   /// The list of all frames in the timeline.
   List<Frame> get frames => List.unmodifiable(_frames);
@@ -71,6 +76,78 @@ class MovieController extends ChangeNotifier {
 
   /// Whether there are any frames.
   bool get hasFrames => _frames.isNotEmpty;
+
+  /// Whether playback is currently running.
+  bool get isPlaying => _isPlaying;
+
+  /// Whether playback loops back to the first frame after the last.
+  bool get looping => _looping;
+
+  /// Sets whether playback should loop.
+  void setLooping(bool value) {
+    if (_looping == value) return;
+    _looping = value;
+    notifyListeners();
+  }
+
+  /// Whether there is a next frame to advance to during playback.
+  bool get _hasNextFrame =>
+      _currentFrameIndex >= 0 && _currentFrameIndex < _frames.length - 1;
+
+  // ---------------------------------------------------------------------------
+  // Playback
+  // ---------------------------------------------------------------------------
+
+  /// Starts playback from the current frame.
+  ///
+  /// Each frame is shown for its [Frame.displayDuration]. Playback stops
+  /// automatically after the last frame. If no frame is selected playback
+  /// starts from the first frame.
+  void play() {
+    if (_frames.isEmpty) return;
+    if (!hasCurrentFrame) _currentFrameIndex = 0;
+    _isPlaying = true;
+    notifyListeners();
+    _scheduleNextFrame();
+  }
+
+  /// Stops playback and cancels the pending timer.
+  void pause() {
+    _isPlaying = false;
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    notifyListeners();
+  }
+
+  /// Toggles between play and pause.
+  void togglePlayPause() {
+    if (_isPlaying) {
+      pause();
+    } else {
+      play();
+    }
+  }
+
+  void _scheduleNextFrame() {
+    _playbackTimer?.cancel();
+    if (!_isPlaying || !hasCurrentFrame) return;
+
+    final duration = _frames[_currentFrameIndex].displayDuration;
+    _playbackTimer = Timer(duration, () {
+      if (!_isPlaying) return;
+      if (_hasNextFrame) {
+        _currentFrameIndex++;
+        notifyListeners();
+        _scheduleNextFrame();
+      } else if (_looping) {
+        _currentFrameIndex = 0;
+        notifyListeners();
+        _scheduleNextFrame();
+      } else {
+        pause();
+      }
+    });
+  }
 
   /// Sets the FPS for export.
   void setFps(double newFps) {
@@ -143,5 +220,13 @@ class MovieController extends ChangeNotifier {
     _frames[_currentFrameIndex] =
         _frames[_currentFrameIndex].copyWith(strokes: strokes);
     notifyListeners();
+  }
+
+  /// Cancels the playback timer. Call when the controller is no longer needed.
+  @override
+  void dispose() {
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    super.dispose();
   }
 }
