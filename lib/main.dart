@@ -141,10 +141,14 @@ class _PaintScreenState extends State<PaintScreen> {
     });
 
     if (_movieMode) {
-      // Just entered movie mode — save current strokes as the first frame if
-      // the canvas is not empty and there are no frames yet.
-      if (_canvasController.strokes.isNotEmpty && !_movieController.hasFrames) {
-        _addFrameFromCanvas();
+      // Just entered movie mode — capture current strokes as the first frame
+      // without clearing the canvas so the user still sees their content.
+      if (_canvasController.strokes.isNotEmpty) {
+        _movieController.addFrame(
+          strokes: List.from(_canvasController.strokes),
+        );
+        if (!mounted) return;
+        _showSnackBar('Frame 1 added.');
       }
     }
   }
