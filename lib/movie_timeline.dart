@@ -210,13 +210,6 @@ class _FrameThumbnail extends StatelessWidget {
                 fontSize: 9,
               ),
             ),
-            Text(
-              '${frame.strokes.length} stroke${frame.strokes.length == 1 ? '' : 's'}',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontSize: 9,
-              ),
-            ),
           ],
         ),
       ),
