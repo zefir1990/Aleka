@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 /// Represents a single stroke drawn by the user.
@@ -13,14 +15,22 @@ class Stroke {
   });
 }
 
-/// Controller for managing strokes and undo/clear operations.
+/// Controller for managing strokes, fill layers, and undo/clear operations.
 class PaintCanvasController extends ChangeNotifier {
   final List<Stroke> _strokes = [];
   final List<Stroke> _redoStack = [];
 
+  /// The accumulated fill image (raster layer painted beneath strokes).
+  ui.Image? fillImage;
+
+  /// Incremented each time the fill image changes — used by the painter
+  /// to detect when the fill needs redrawing.
+  int fillGeneration = 0;
+
   List<Stroke> get strokes => List.unmodifiable(_strokes);
   bool get canUndo => _strokes.isNotEmpty;
   bool get canRedo => _redoStack.isNotEmpty;
+  bool get hasFill => fillImage != null;
 
   void addStroke(Stroke stroke) {
     _strokes.add(stroke);
@@ -42,10 +52,30 @@ class PaintCanvasController extends ChangeNotifier {
     }
   }
 
+  /// Sets the fill image. Pass `null` to clear the fill.
+  void setFillImage(ui.Image? image) {
+    fillImage = image;
+    fillGeneration++;
+    notifyListeners();
+  }
+
+  /// Removes only the fill image (strokes remain).
+  void clearFill() {
+    if (fillImage != null) {
+      fillImage = null;
+      fillGeneration++;
+      notifyListeners();
+    }
+  }
+
   void clear() {
-    if (_strokes.isNotEmpty) {
+    final hadStrokes = _strokes.isNotEmpty;
+    final hadFill = fillImage != null;
+    if (hadStrokes || hadFill) {
       _strokes.clear();
       _redoStack.clear();
+      fillImage = null;
+      fillGeneration++;
       notifyListeners();
     }
   }
@@ -55,6 +85,8 @@ class PaintCanvasController extends ChangeNotifier {
     _strokes.clear();
     _strokes.addAll(newStrokes);
     _redoStack.clear();
+    fillImage = null;
+    fillGeneration++;
     notifyListeners();
   }
 }
@@ -64,12 +96,16 @@ class PaintCanvas extends StatefulWidget {
   final PaintCanvasController controller;
   final Color color;
   final double strokeWidth;
+  final bool fillTool;
+  final void Function(Offset localPosition)? onFillTap;
 
   const PaintCanvas({
     super.key,
     required this.controller,
     required this.color,
     required this.strokeWidth,
+    this.fillTool = false,
+    this.onFillTap,
   });
 
   @override
@@ -82,6 +118,11 @@ class _PaintCanvasState extends State<PaintCanvas> {
   void _onPointerDown(PointerDownEvent event) {
     final box = context.findRenderObject() as RenderBox;
     final localPosition = box.globalToLocal(event.position);
+
+    if (widget.fillTool) {
+      widget.onFillTap?.call(localPosition);
+      return;
+    }
 
     _currentStroke = Stroke(
       points: [localPosition],
@@ -134,6 +175,8 @@ class _PaintCanvasState extends State<PaintCanvas> {
             painter: _CanvasPainter(
               strokes: widget.controller.strokes,
               currentStroke: _currentStroke,
+              fillImage: widget.controller.fillImage,
+              fillGeneration: widget.controller.fillGeneration,
             ),
             size: Size.infinite,
           ),
@@ -147,19 +190,34 @@ class _PaintCanvasState extends State<PaintCanvas> {
 class _CanvasPainter extends CustomPainter {
   final List<Stroke> strokes;
   final Stroke? currentStroke;
+  final ui.Image? fillImage;
+  final int fillGeneration;
 
   _CanvasPainter({
     required this.strokes,
     this.currentStroke,
+    this.fillImage,
+    this.fillGeneration = 0,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Fill background with white (or transparent grid for dark mode).
+    // Fill background with white.
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Paint()..color = Colors.white,
     );
+
+    // Draw the fill image (raster layer beneath strokes).
+    final fill = fillImage;
+    if (fill != null) {
+      canvas.drawImageRect(
+        fill,
+        Rect.fromLTWH(0, 0, fill.width.toDouble(), fill.height.toDouble()),
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint(),
+      );
+    }
 
     // Draw completed strokes.
     for (final stroke in strokes) {
@@ -206,5 +264,9 @@ class _CanvasPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _CanvasPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _CanvasPainter oldDelegate) {
+    return fillGeneration != oldDelegate.fillGeneration ||
+        strokes != oldDelegate.strokes ||
+        currentStroke != oldDelegate.currentStroke;
+  }
 }

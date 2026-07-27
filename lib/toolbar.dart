@@ -20,7 +20,7 @@ const List<Color> _paletteColors = [
   Color(0xFF8D6E63), // warm brown
 ];
 
-/// A toolbar with color swatches, a brush-size slider, undo, and clear.
+/// A toolbar with color swatches, a brush-size slider, fill bucket, undo, and clear.
 class PaintToolbar extends StatelessWidget {
   final Color currentColor;
   final double strokeWidth;
@@ -33,6 +33,8 @@ class PaintToolbar extends StatelessWidget {
   final VoidCallback onExport;
   final bool movieMode;
   final VoidCallback onToggleMovieMode;
+  final bool fillTool;
+  final VoidCallback onToggleFillTool;
 
   const PaintToolbar({
     super.key,
@@ -47,6 +49,8 @@ class PaintToolbar extends StatelessWidget {
     required this.onExport,
     this.movieMode = false,
     this.onToggleMovieMode = _noop,
+    this.fillTool = false,
+    this.onToggleFillTool = _noop,
   });
 
   static void _noop() {}
@@ -213,6 +217,16 @@ class PaintToolbar extends StatelessWidget {
             ),
 
             const VerticalDivider(width: 20),
+
+            // Fill bucket toggle
+            IconButton(
+              icon: Icon(Icons.format_color_fill),
+              tooltip: fillTool ? 'Fill mode (on)' : 'Fill bucket',
+              color: fillTool
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+              onPressed: onToggleFillTool,
+            ),
 
             // Undo
             IconButton(

@@ -1,6 +1,10 @@
+import 'dart:collection';
+import 'dart:ui' as ui;
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 
 import 'paint_canvas.dart';
 import 'toolbar.dart';
@@ -56,6 +60,8 @@ typedef LoadStrokesFn = Future<List<Stroke>?> Function();
 typedef CapturePngFn = Future<Uint8List?> Function(GlobalKey key);
 typedef SavePngFn = Future<bool> Function(Uint8List bytes);
 typedef SaveVideoFn = Future<bool> Function(Uint8List bytes);
+typedef SaveAlekaFn = Future<bool> Function(String content);
+typedef LoadAlekaFn = Future<String?> Function();
 
 class PaintScreen extends StatefulWidget {
   final SaveStrokesFn? saveStrokes;
@@ -64,6 +70,8 @@ class PaintScreen extends StatefulWidget {
   final SavePngFn? savePngOverride;
   final SaveVideoFn? saveVideoOverride;
   final EncodeVideoFn? videoEncodeOverride;
+  final SaveAlekaFn? saveAlekaOverride;
+  final LoadAlekaFn? loadAlekaOverride;
 
   const PaintScreen({
     super.key,
@@ -73,6 +81,8 @@ class PaintScreen extends StatefulWidget {
     this.savePngOverride,
     this.saveVideoOverride,
     this.videoEncodeOverride,
+    this.saveAlekaOverride,
+    this.loadAlekaOverride,
   });
 
   @override
@@ -86,6 +96,7 @@ class _PaintScreenState extends State<PaintScreen> {
   final GlobalKey _canvasRepaintKey = GlobalKey();
   final MovieController _movieController = MovieController();
   bool _movieMode = false;
+  bool _fillTool = false;
 
   // Whether we are currently loading frame strokes (suppress saving during
   // setState triggered by frame selection).
@@ -126,10 +137,11 @@ class _PaintScreenState extends State<PaintScreen> {
   }
 
   SaveStrokesFn get _saveFn => widget.saveStrokes ?? saveToFile;
-  LoadStrokesFn get _loadFn => widget.loadStrokes ?? loadFromFile;
   CapturePngFn get _captureFn => widget.capturePngOverride ?? capturePng;
   SavePngFn get _savePngFn => widget.savePngOverride ?? savePngToFile;
   SaveVideoFn get _saveVideoFn => widget.saveVideoOverride ?? saveVideoToFile;
+  SaveAlekaFn get _saveAlekaFn => widget.saveAlekaOverride ?? saveAlekaContent;
+  LoadAlekaFn get _loadAlekaFn => widget.loadAlekaOverride ?? loadAlekaContent;
 
   // ---------------------------------------------------------------------------
   // Movie mode helpers
@@ -138,6 +150,10 @@ class _PaintScreenState extends State<PaintScreen> {
   void _toggleMovieMode() {
     setState(() {
       _movieMode = !_movieMode;
+      if (_movieMode) {
+        // Fill tool and movie mode are mutually exclusive.
+        _fillTool = false;
+      }
     });
 
     if (_movieMode) {
@@ -150,6 +166,184 @@ class _PaintScreenState extends State<PaintScreen> {
       }
     }
   }
+
+  void _toggleFillTool() {
+    setState(() {
+      _fillTool = !_fillTool;
+      if (_fillTool) {
+        // Fill tool and movie mode are mutually exclusive.
+        _movieMode = false;
+      }
+    });
+  }
+
+  /// Flood-fills the canvas at [localPosition] with the current color.
+  Future<void> _onFillTap(Offset localPosition) async {
+    final fillRgba = _colorToRgba(_currentColor);
+
+    // Fast path: if the canvas has no strokes, just fill the entire background
+    // with a solid-colour image — no need to capture or run BFS.
+    if (_canvasController.strokes.isEmpty) {
+      final solid = await _createSolidFill(fillRgba);
+      if (!mounted) return;
+      if (solid != null) {
+        _canvasController.setFillImage(solid);
+        if (_movieMode) _saveCanvasToCurrentFrame();
+      }
+      return;
+    }
+
+    // 1. Capture the current canvas as PNG bytes at 1× resolution so that
+    //    logical tap coordinates map 1:1 to image pixels.
+    final pngBytes = await capturePng(_canvasRepaintKey, pixelRatio: 1.0);
+    if (!mounted) return;
+    if (pngBytes == null) {
+      _showSnackBar('Fill failed — could not capture canvas.', isError: true);
+      return;
+    }
+
+    // 2. Decode the PNG for pixel manipulation.
+    final image = img.decodePng(pngBytes);
+    if (image == null) {
+      _showSnackBar('Fill failed — could not decode canvas image.', isError: true);
+      return;
+    }
+
+    // 3. Map logical tap position to image-pixel coordinates (pixelRatio 1.0
+    //    means logical pixels == image pixels).
+    final px = localPosition.dx.round();
+    final py = localPosition.dy.round();
+
+    // Bounds check.
+    if (px < 0 || py < 0 || px >= image.width || py >= image.height) {
+      _showSnackBar('Fill failed — tap is outside canvas bounds.', isError: true);
+      return;
+    }
+
+    // 4. Get the target color at the tap point.
+    final targetPixel = image.getPixel(px, py);
+
+    // If the target already matches the fill colour, there is nothing to do.
+    final targetRgba = _pixelToRgba(targetPixel);
+    if (_colorDistance(targetRgba, fillRgba) <= 5) {
+      return;
+    }
+
+    // 5. BFS flood fill with tolerance (handles anti-aliased stroke edges).
+    final filledCount = _floodFill(image, px, py, targetRgba, fillRgba);
+
+    if (filledCount == 0) {
+      return; // No pixels matched the target colour.
+    }
+
+    // 6. Encode the modified image back to PNG bytes…
+    final filledPng = img.encodePng(image);
+
+    // 7. …and decode as a ui.Image so the painter can draw it.
+    final codec = await ui.instantiateImageCodec(Uint8List.fromList(filledPng));
+    final frameInfo = await codec.getNextFrame();
+    final uiImage = frameInfo.image;
+
+    if (!mounted) return;
+
+    // 8. Store in the controller so it appears beneath strokes.
+    _canvasController.setFillImage(uiImage);
+
+    // If in movie mode, save the fill state to the current frame.
+    if (_movieMode) {
+      _saveCanvasToCurrentFrame();
+    }
+  }
+
+  /// Creates a solid-colour 1×1 [ui.Image] from [fillRgba].
+  ///
+  /// A 1×1 image is enough — the painter stretches it to fill the canvas.
+  Future<ui.Image?> _createSolidFill(_Rgba fillRgba) async {
+    final solidImage = img.Image(width: 1, height: 1);
+    solidImage.setPixelRgba(0, 0, fillRgba.r, fillRgba.g, fillRgba.b, fillRgba.a);
+    final pngBytes = img.encodePng(solidImage);
+    final codec = await ui.instantiateImageCodec(Uint8List.fromList(pngBytes));
+    final frameInfo = await codec.getNextFrame();
+    return frameInfo.image;
+  }
+
+  /// BFS flood fill: replaces pixels whose colour is within [kTolerance]
+  /// distance of [target] with [fill], using 4-way connectivity.
+  ///
+  /// Returns the number of pixels that were filled.
+  static const _kFillTolerance = 1000;
+
+  int _floodFill(
+    img.Image image,
+    int startX,
+    int startY,
+    _Rgba target,
+    _Rgba fill,
+  ) {
+    final width = image.width;
+    final height = image.height;
+
+    final queue = Queue<(int, int)>();
+    final visited = <int>{};
+    var filled = 0;
+
+    queue.add((startX, startY));
+    visited.add(startY * width + startX);
+
+    while (queue.isNotEmpty) {
+      final (x, y) = queue.removeFirst();
+
+      image.setPixelRgba(x, y, fill.r, fill.g, fill.b, fill.a);
+      filled++;
+
+      // Check 4 neighbours.
+      void tryAdd(int nx, int ny) {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+        final key = ny * width + nx;
+        if (visited.contains(key)) return;
+        final p = image.getPixel(nx, ny);
+        final c = _Rgba(p.r.toInt(), p.g.toInt(), p.b.toInt(), p.a.toInt());
+        if (_colorDistance(c, target) > _kFillTolerance) return;
+        visited.add(key);
+        queue.add((nx, ny));
+      }
+
+      tryAdd(x - 1, y);
+      tryAdd(x + 1, y);
+      tryAdd(x, y - 1);
+      tryAdd(x, y + 1);
+    }
+
+    return filled;
+  }
+
+  /// Squared RGB distance between two colours (ignores alpha).
+  ///
+  /// Max value is ~195 075 (3 × 255²). With [_kFillTolerance] = 1000 each
+  /// channel may differ by up to ~18 from the target — enough to cross
+  /// anti-aliased stroke edges without leaking through solid strokes.
+  static int _colorDistance(_Rgba a, _Rgba b) {
+    final dr = a.r - b.r;
+    final dg = a.g - b.g;
+    final db = a.b - b.b;
+    return dr * dr + dg * dg + db * db;
+  }
+
+  /// Converts an image-package [img.Pixel] to an [_Rgba].
+  static _Rgba _pixelToRgba(img.Pixel p) => _Rgba(
+        p.r.toInt(),
+        p.g.toInt(),
+        p.b.toInt(),
+        p.a.toInt(),
+      );
+
+  /// Converts a Flutter [Color] to RGBA components.
+  static _Rgba _colorToRgba(Color c) => _Rgba(
+        (c.r * 255).round(),
+        (c.g * 255).round(),
+        (c.b * 255).round(),
+        (c.a * 255).round(),
+      );
 
   /// Saves the current canvas strokes to the currently selected frame.
   void _saveCanvasToCurrentFrame() {
@@ -219,6 +413,31 @@ class _PaintScreenState extends State<PaintScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _onSave() async {
+    if (_movieMode && _movieController.hasFrames) {
+      // Save current canvas strokes to the current frame first.
+      _saveCanvasToCurrentFrame();
+
+      // Serialize all frames with FPS.
+      final movieFrames = _movieController.frames.map((f) => (
+            strokes: f.strokes,
+            durationMs: f.displayDuration.inMilliseconds,
+          )).toList();
+      final content = serializeMovie(
+        fps: _movieController.fps,
+        frames: movieFrames,
+      );
+      final ok = await _saveAlekaFn(content);
+      if (!mounted) return;
+      final n = _movieController.frameCount;
+      _showSnackBar(
+        ok
+            ? 'Saved as .aleka ($n frame${n == 1 ? '' : 's'})'
+            : 'Save cancelled or failed.',
+      );
+      return;
+    }
+
+    // Paint mode: save canvas strokes.
     final strokes = _canvasController.strokes;
     if (strokes.isEmpty) {
       _showSnackBar('Nothing to save — canvas is empty.');
@@ -230,14 +449,51 @@ class _PaintScreenState extends State<PaintScreen> {
   }
 
   Future<void> _onLoad() async {
-    final loaded = await _loadFn();
+    final content = await _loadAlekaFn();
     if (!mounted) return;
-    if (loaded == null) {
+    if (content == null) {
       _showSnackBar('Load cancelled or file is invalid.');
       return;
     }
-    _canvasController.replaceStrokes(loaded);
-    _showSnackBar('Loaded ${loaded.length} stroke${loaded.length == 1 ? '' : 's'}.');
+
+    // Try movie data first — if the file contains a movie section, restore
+    // the full animation timeline.
+    final movieData = deserializeMovie(content);
+    if (movieData != null) {
+      // Switch to movie mode and restore frames.
+      if (!_movieMode) {
+        setState(() => _movieMode = true);
+      }
+      _movieController.clearFrames();
+      for (final frame in movieData.frames) {
+        _movieController.addFrame(
+          strokes: frame.strokes,
+          duration: Duration(milliseconds: frame.durationMs),
+        );
+      }
+      _movieController.setFps(movieData.fps);
+      if (_movieController.hasCurrentFrame) {
+        _loadFrameToCanvas(_movieController.currentFrame!);
+      }
+      final n = _movieController.frameCount;
+      _showSnackBar('Loaded animation ($n frame${n == 1 ? '' : 's'}).');
+      return;
+    }
+
+    // No movie section — paint-mode file. Load strokes onto the canvas and
+    // exit movie mode if we were in it.
+    final strokes = deserializeStrokes(content);
+    if (strokes == null) {
+      _showSnackBar('Load cancelled or file is invalid.');
+      return;
+    }
+
+    // Exit movie mode so the loaded strokes are visible on the paint canvas.
+    if (_movieMode) {
+      setState(() => _movieMode = false);
+    }
+    _canvasController.replaceStrokes(strokes);
+    _showSnackBar('Loaded ${strokes.length} stroke${strokes.length == 1 ? '' : 's'}.');
   }
 
   Future<void> _onExport() async {
@@ -362,6 +618,8 @@ class _PaintScreenState extends State<PaintScreen> {
                 controller: _canvasController,
                 color: _currentColor,
                 strokeWidth: _strokeWidth,
+                fillTool: _fillTool,
+                onFillTap: _onFillTap,
               ),
             ),
           ),
@@ -386,6 +644,8 @@ class _PaintScreenState extends State<PaintScreen> {
               onExport: _onExport,
               movieMode: _movieMode,
               onToggleMovieMode: _toggleMovieMode,
+              fillTool: _fillTool,
+              onToggleFillTool: _toggleFillTool,
             ),
           ),
           // Timeline floats at the bottom.
@@ -406,4 +666,10 @@ class _PaintScreenState extends State<PaintScreen> {
       ),
     );
   }
+}
+
+/// Lightweight RGBA value for pixel comparisons during flood fill.
+class _Rgba {
+  final int r, g, b, a;
+  const _Rgba(this.r, this.g, this.b, this.a);
 }

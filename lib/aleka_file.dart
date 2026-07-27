@@ -14,24 +14,47 @@ import 'web_download_stub.dart'
 
 /// The header used to identify .aleka files.
 const _alekaMagic = 'aleka';
-const _alekaVersion = '1.0';
+const _alekaVersion = '1.1';
 
 /// Serializes a list of [Stroke]s into the .aleka JSON format.
 String serializeStrokes(List<Stroke> strokes) {
-  final json = {
+  final json = <String, dynamic>{
     _alekaMagic: _alekaVersion,
-    'strokes': strokes.map((s) {
-      return {
-        'color': s.color.toARGB32(),
-        'strokeWidth': s.strokeWidth,
-        'points': s.points
-            .map((p) => [p.dx, p.dy])
-            .toList(),
-      };
-    }).toList(),
+    'strokes': _strokesToJson(strokes),
   };
   const encoder = JsonEncoder.withIndent('  ');
   return encoder.convert(json);
+}
+
+List<Map<String, dynamic>> _strokesToJson(List<Stroke> strokes) {
+  return strokes.map((s) {
+    return {
+      'color': s.color.toARGB32(),
+      'strokeWidth': s.strokeWidth,
+      'points': s.points
+          .map((p) => [p.dx, p.dy])
+          .toList(),
+    };
+  }).toList();
+}
+
+List<Stroke> _strokesFromJson(List<dynamic> strokesList) {
+  return strokesList.map((s) {
+    final map = s as Map<String, dynamic>;
+    final points = (map['points'] as List<dynamic>).map((p) {
+      final pair = p as List<dynamic>;
+      return Offset(
+        (pair[0] as num).toDouble(),
+        (pair[1] as num).toDouble(),
+      );
+    }).toList();
+
+    return Stroke(
+      points: points,
+      color: Color(map['color'] as int),
+      strokeWidth: (map['strokeWidth'] as num).toDouble(),
+    );
+  }).toList();
 }
 
 /// Deserializes the .aleka JSON [source] into a list of [Stroke]s.
@@ -44,34 +67,92 @@ List<Stroke>? deserializeStrokes(String source) {
     final strokesList = json['strokes'] as List<dynamic>?;
     if (strokesList == null) return const [];
 
-    return strokesList.map((s) {
-      final map = s as Map<String, dynamic>;
-      final points = (map['points'] as List<dynamic>).map((p) {
-        final pair = p as List<dynamic>;
-        return Offset(
-          (pair[0] as num).toDouble(),
-          (pair[1] as num).toDouble(),
-        );
-      }).toList();
-
-      return Stroke(
-        points: points,
-        color: Color(map['color'] as int),
-        strokeWidth: (map['strokeWidth'] as num).toDouble(),
-      );
-    }).toList();
+    return _strokesFromJson(strokesList);
   } catch (_) {
     return null;
   }
 }
 
-/// Prompts the user to save strokes to a `.aleka` file.
+// ---------------------------------------------------------------------------
+// Movie (animation) serialization
+// ---------------------------------------------------------------------------
+
+/// A single deserialized movie frame.
+typedef MovieFrameData = ({
+  List<Stroke> strokes,
+  int durationMs,
+});
+
+/// The result of deserializing a movie-mode .aleka file.
+typedef MovieLoadResult = ({
+  double fps,
+  List<MovieFrameData> frames,
+});
+
+/// Serializes all movie frames and FPS into the .aleka JSON format.
+///
+/// The resulting string is also valid for [deserializeStrokes] — the strokes
+/// from the first frame are written at the top level so older versions of the
+/// app can still read the drawing (in paint mode).
+String serializeMovie({
+  required double fps,
+  required List<MovieFrameData> frames,
+}) {
+  final json = <String, dynamic>{
+    _alekaMagic: _alekaVersion,
+    'strokes': frames.isNotEmpty ? _strokesToJson(frames.first.strokes) : [],
+    'movie': {
+      'fps': fps,
+      'frames': frames.map((f) {
+        return {
+          'strokes': _strokesToJson(f.strokes),
+          'durationMs': f.durationMs,
+        };
+      }).toList(),
+    },
+  };
+  const encoder = JsonEncoder.withIndent('  ');
+  return encoder.convert(json);
+}
+
+/// Deserializes the .aleka JSON [source] into movie data.
+///
+/// Returns `null` if the data does not contain a valid movie section.
+MovieLoadResult? deserializeMovie(String source) {
+  try {
+    final json = jsonDecode(source) as Map<String, dynamic>;
+    if (json[_alekaMagic] == null) return null;
+
+    final movie = json['movie'] as Map<String, dynamic>?;
+    if (movie == null) return null; // Paint-mode file — no movie data.
+
+    final fps = (movie['fps'] as num?)?.toDouble() ?? 12.0;
+    final framesJson = movie['frames'] as List<dynamic>?;
+    if (framesJson == null || framesJson.isEmpty) {
+      return (fps: fps, frames: const []);
+    }
+
+    final frames = framesJson.map((f) {
+      final map = f as Map<String, dynamic>;
+      final strokes = _strokesFromJson(
+          map['strokes'] as List<dynamic>? ?? []);
+      final durationMs = (map['durationMs'] as num?)?.toInt() ?? 500;
+      return (strokes: strokes, durationMs: durationMs);
+    }).toList();
+
+    return (fps: fps, frames: frames);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Prompts the user to save [content] to a `.aleka` file.
+///
+/// [fileName] defaults to `drawing.aleka`.
 ///
 /// Returns `true` on success, `false` if cancelled or errored.
-Future<bool> saveToFile(List<Stroke> strokes) async {
-  final content = serializeStrokes(strokes);
+Future<bool> saveAlekaContent(String content, {String fileName = 'drawing.aleka'}) async {
   final bytes = utf8.encode(content);
-  final fileName = 'drawing.aleka';
 
   try {
     if (kIsWeb) {
@@ -92,10 +173,10 @@ Future<bool> saveToFile(List<Stroke> strokes) async {
   }
 }
 
-/// Prompts the user to load strokes from a `.aleka` file.
+/// Prompts the user to open a `.aleka` file and returns its raw content.
 ///
-/// Returns the deserialized strokes on success, or `null` if cancelled/errored.
-Future<List<Stroke>?> loadFromFile() async {
+/// Returns `null` if cancelled, errored, or the file could not be read.
+Future<String?> loadAlekaContent() async {
   try {
     final result = await FilePicker.platform.pickFiles(
       dialogTitle: 'Open .aleka drawing',
@@ -106,21 +187,34 @@ Future<List<Stroke>?> loadFromFile() async {
 
     if (result == null || result.files.isEmpty) return null;
 
-    String content;
     if (kIsWeb) {
       final bytes = result.files.single.bytes;
       if (bytes == null) return null;
-      content = utf8.decode(bytes);
+      return utf8.decode(bytes);
     } else {
       final path = result.files.single.path;
       if (path == null) return null;
-      content = await io.File(path).readAsString();
+      return await io.File(path).readAsString();
     }
-
-    return deserializeStrokes(content);
   } catch (_) {
     return null;
   }
+}
+
+/// Prompts the user to save strokes to a `.aleka` file.
+///
+/// Returns `true` on success, `false` if cancelled or errored.
+Future<bool> saveToFile(List<Stroke> strokes) async {
+  return saveAlekaContent(serializeStrokes(strokes));
+}
+
+/// Prompts the user to load strokes from a `.aleka` file.
+///
+/// Returns the deserialized strokes on success, or `null` if cancelled/errored.
+Future<List<Stroke>?> loadFromFile() async {
+  final content = await loadAlekaContent();
+  if (content == null) return null;
+  return deserializeStrokes(content);
 }
 
 /// Captures the widget behind [repaintKey] as PNG bytes.
