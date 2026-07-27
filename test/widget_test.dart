@@ -1331,7 +1331,9 @@ void main() {
     testWidgets('remove frame button triggers onRemoveFrame', (tester) async {
       var removed = false;
       final controller = MovieController();
-      controller.addFrame();
+      controller.addFrame(); // Frame 0 — cannot be removed.
+      controller.addFrame(); // Frame 1 — current, can be removed.
+      controller.selectFrame(1);
       await tester.pumpWidget(wrapTimeline(controller, onRemoveFrame: () => removed = true));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.remove_circle_outline));
@@ -1542,8 +1544,6 @@ void main() {
       await tester.tap(addBtn);
       await tester.pumpAndSettle();
 
-      // Should show "Frame 1 added."
-      expect(find.text('Frame 1 added.'), findsOneWidget);
       // Should render frame thumbnail "1".
       expect(find.text('1'), findsOneWidget);
     });
@@ -1843,14 +1843,8 @@ void main() {
       expect(emptyAddBtn, findsOneWidget);
       await tester.tap(emptyAddBtn);
       await tester.pumpAndSettle();
-      expect(find.text('Frame 1 added.'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 3));
-      await tester.pumpAndSettle();
 
       await tester.tap(addFrameBtn());
-      await tester.pumpAndSettle();
-      expect(find.text('Frame 2 added.'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 3));
       await tester.pumpAndSettle();
 
       // 3. Brush on frame one.
@@ -2126,10 +2120,6 @@ void main() {
       expect(emptyAddBtn, findsOneWidget);
       await tester.tap(emptyAddBtn);
       await tester.pumpAndSettle();
-      expect(find.text('Frame 1 added.'), findsOneWidget);
-      // Let snackbar dismiss so it does not block taps.
-      await tester.pump(const Duration(seconds: 3));
-      await tester.pumpAndSettle();
 
       // After first frame, the add button changes to add_circle_outline.
       final addCircleBtn = find.descendant(
@@ -2137,9 +2127,6 @@ void main() {
         matching: find.byIcon(Icons.add_circle_outline),
       );
       await tester.tap(addCircleBtn);
-      await tester.pumpAndSettle();
-      expect(find.text('Frame 2 added.'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 3));
       await tester.pumpAndSettle();
 
       // 3. Draw on frame 1.

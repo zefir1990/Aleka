@@ -147,8 +147,6 @@ class _PaintScreenState extends State<PaintScreen> {
         _movieController.addFrame(
           strokes: List.from(_canvasController.strokes),
         );
-        if (!mounted) return;
-        _showSnackBar('Frame 1 added.');
       }
     }
   }
@@ -163,8 +161,6 @@ class _PaintScreenState extends State<PaintScreen> {
     _movieController.addFrame(strokes: List.from(_canvasController.strokes));
     // Clear canvas for the next frame.
     _canvasController.clear();
-    if (!mounted) return;
-    _showSnackBar('Frame ${_movieController.frameCount} added.');
   }
 
   void _onAddFrame() {
@@ -173,6 +169,8 @@ class _PaintScreenState extends State<PaintScreen> {
 
   void _onRemoveFrame() {
     if (!_movieController.hasCurrentFrame) return;
+    // First frame (index 0) cannot be removed.
+    if (_movieController.currentFrameIndex == 0) return;
     final index = _movieController.currentFrameIndex;
     _movieController.removeFrame(index);
     if (!mounted) return;
@@ -183,7 +181,6 @@ class _PaintScreenState extends State<PaintScreen> {
     } else {
       _canvasController.clear();
     }
-    _showSnackBar('Frame removed.');
   }
 
   void _onSelectFrame(int index) {

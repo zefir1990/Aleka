@@ -323,11 +323,16 @@ class _ControlsPanel extends StatelessWidget {
             onPressed: onAddFrame,
             iconSize: 22,
           ),
-          // Remove frame button.
+          // Remove frame button — disabled for the first frame.
           IconButton(
             icon: const Icon(Icons.remove_circle_outline),
-            tooltip: 'Remove current frame',
-            onPressed: controller.hasCurrentFrame ? onRemoveFrame : null,
+            tooltip: controller.currentFrameIndex == 0
+                ? 'Cannot remove first frame'
+                : 'Remove current frame',
+            onPressed: controller.hasCurrentFrame &&
+                    controller.currentFrameIndex != 0
+                ? onRemoveFrame
+                : null,
             iconSize: 22,
           ),
         ],
