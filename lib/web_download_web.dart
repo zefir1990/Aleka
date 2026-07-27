@@ -5,9 +5,9 @@ import 'dart:typed_data';
 
 /// Triggers a browser file download by creating a blob URL and clicking an
 /// anchor element.
-Future<bool> downloadBytes(String fileName, Uint8List bytes) async {
+Future<bool> downloadBytes(String fileName, Uint8List bytes, {String? mimeType}) async {
   try {
-    final blob = html.Blob([bytes]);
+    final blob = html.Blob([bytes], mimeType);
     final url = html.Url.createObjectUrlFromBlob(blob);
     html.AnchorElement(href: url)
       ..setAttribute('download', fileName)

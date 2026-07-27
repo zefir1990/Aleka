@@ -126,15 +126,28 @@ Future<List<Stroke>?> loadFromFile() async {
 /// Captures the widget behind [repaintKey] as PNG bytes.
 ///
 /// [repaintKey] must be attached to a [RepaintBoundary].
-Future<Uint8List?> capturePng(GlobalKey repaintKey, {double pixelRatio = 3.0}) async {
+///
+/// On web the pixel ratio defaults to 1.0 because CanvasKit already renders
+/// at the device pixel ratio — stacking another multiplier on top produces
+/// enormous images that strain browser memory during video encoding.
+/// Desktop defaults to 2.0 for higher-quality captures.
+Future<Uint8List?> capturePng(GlobalKey repaintKey, {double? pixelRatio}) async {
+  final effectiveRatio = pixelRatio ?? (kIsWeb ? 1.0 : 2.0);
   try {
     final boundary =
         repaintKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
     if (boundary == null) return null;
 
-    final image = await boundary.toImage(pixelRatio: pixelRatio);
+    final image = await boundary.toImage(pixelRatio: effectiveRatio);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    return byteData?.buffer.asUint8List();
+    if (byteData == null) return null;
+    // Use offsetInBytes / lengthInBytes — byteData may be a view into a
+    // larger buffer, and asUint8List() without parameters reads from offset 0
+    // which can include garbage bytes that break PNG decoders.
+    return byteData.buffer.asUint8List(
+      byteData.offsetInBytes,
+      byteData.lengthInBytes,
+    );
   } catch (_) {
     return null;
   }
@@ -170,16 +183,17 @@ Future<bool> savePngToFile(Uint8List bytes) async {
 /// Returns `true` on success, `false` if cancelled or errored.
 Future<bool> saveVideoToFile(Uint8List bytes) async {
   const fileName = 'animation.mp4';
+  const extensions = <String>['mp4'];
 
   try {
     if (kIsWeb) {
-      return await downloadBytes(fileName, bytes);
+      return await downloadBytes(fileName, bytes, mimeType: 'video/mp4');
     } else {
       final path = await FilePicker.platform.saveFile(
         dialogTitle: 'Export video',
         fileName: fileName,
         type: FileType.custom,
-        allowedExtensions: ['mp4'],
+        allowedExtensions: extensions,
       );
       if (path == null) return false;
       await io.File(path).writeAsBytes(bytes);

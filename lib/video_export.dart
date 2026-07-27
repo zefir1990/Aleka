@@ -6,6 +6,21 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'video_export_stub.dart'
     if (dart.library.html) 'video_export_web.dart';
 
+/// Result of a video encoding operation.
+///
+/// When [bytes] is non-null the encoding succeeded and the field contains the
+/// MP4 / WebM file.  When [bytes] is null, [error] provides a human-readable
+/// description of what went wrong (e.g. "ffmpeg not found" or the stderr
+/// produced by the ffmpeg CLI).
+typedef VideoEncodeResult = ({Uint8List? bytes, String? error});
+
+/// Signature for pluggable video encoding — used for testability.
+typedef EncodeVideoFn = Future<VideoEncodeResult> Function({
+  required List<Uint8List> pngFrames,
+  required List<int> delaysMs,
+  required double fps,
+});
+
 /// Encodes a list of PNG frames into an MP4 video.
 ///
 /// [pngFrames] — PNG-encoded bytes for each frame.
@@ -13,16 +28,18 @@ import 'video_export_stub.dart'
 /// [fps] — output framerate (frames per second).
 ///
 /// On desktop: uses ffmpeg CLI to produce H.264 MP4. Requires ffmpeg
-/// installed (detected at runtime; returns `null` with error message if
-/// missing).
+/// installed (detected at runtime; returns error message if missing or
+/// if ffmpeg exits with a non-zero code).
 ///
-/// On web: uses ffmpeg.wasm via the [ffmpeg_wasm] package to produce MP4.
-Future<Uint8List?> encodeVideo({
+/// On web: uses ffmpeg.wasm to produce H.264 MP4.
+Future<VideoEncodeResult> encodeVideo({
   required List<Uint8List> pngFrames,
   required List<int> delaysMs,
   required double fps,
 }) async {
-  if (pngFrames.isEmpty) return null;
+  if (pngFrames.isEmpty) {
+    return (bytes: null, error: 'No frames to encode.');
+  }
 
   if (kIsWeb) {
     return await encodeVideoWeb(pngFrames, delaysMs, fps);
@@ -32,14 +49,16 @@ Future<Uint8List?> encodeVideo({
 }
 
 /// Desktop path: use system ffmpeg CLI.
-Future<Uint8List?> _encodeVideoDesktop(
+Future<VideoEncodeResult> _encodeVideoDesktop(
   List<Uint8List> pngFrames,
   List<int> delaysMs,
   double fps,
 ) async {
   // Check for ffmpeg.
-  final ffmpegPath = await _findFfmpeg();
-  if (ffmpegPath == null) return null;
+  final (:path, :error) = await _findFfmpeg();
+  if (path == null) {
+    return (bytes: null, error: error ?? 'ffmpeg not found.');
+  }
 
   try {
     // Write frames to a temp directory.
@@ -73,7 +92,7 @@ Future<Uint8List?> _encodeVideoDesktop(
 
       // Run ffmpeg.
       final outputPath = '${tempDir.path}/output.mp4';
-      final result = await io.Process.run(ffmpegPath, [
+      final result = await io.Process.run(path, [
         '-y', // Overwrite.
         '-f', 'concat',
         '-safe', '0',
@@ -84,30 +103,39 @@ Future<Uint8List?> _encodeVideoDesktop(
         outputPath,
       ], workingDirectory: tempDir.path);
 
-      if (result.exitCode != 0) return null;
+      if (result.exitCode != 0) {
+        final stderr = (result.stderr as String).trim();
+        return (bytes: null, error: 'ffmpeg error (exit ${result.exitCode}): $stderr');
+      }
 
       final outputFile = io.File(outputPath);
-      if (!outputFile.existsSync()) return null;
+      if (!outputFile.existsSync()) {
+        return (bytes: null, error: 'ffmpeg completed but output file was not created.');
+      }
 
-      return outputFile.readAsBytesSync();
+      return (bytes: outputFile.readAsBytesSync(), error: null);
     } finally {
       // Clean up temp directory.
       try {
         tempDir.deleteSync(recursive: true);
       } catch (_) {}
     }
-  } catch (_) {
-    return null;
+  } catch (e) {
+    return (bytes: null, error: 'ffmpeg encoding failed: $e');
   }
 }
 
+/// Result of looking for the ffmpeg binary.
+typedef _FfmpegLocation = ({String? path, String? error});
+
 /// Locates ffmpeg on the system PATH.
-Future<String?> _findFfmpeg() async {
+Future<_FfmpegLocation> _findFfmpeg() async {
+  // Try `which ffmpeg` first.
   try {
     final result = await io.Process.run('which', ['ffmpeg']);
     if (result.exitCode == 0) {
       final path = (result.stdout as String).trim();
-      if (path.isNotEmpty) return path;
+      if (path.isNotEmpty) return (path: path, error: null);
     }
   } catch (_) {}
 
@@ -117,8 +145,14 @@ Future<String?> _findFfmpeg() async {
     '/opt/homebrew/bin/ffmpeg',
     '/usr/bin/ffmpeg',
   ]) {
-    if (io.File(path).existsSync()) return path;
+    if (io.File(path).existsSync()) return (path: path, error: null);
   }
 
-  return null;
+  return (
+    path: null,
+    error: 'ffmpeg not found. Install ffmpeg to export videos:\n'
+        '  macOS:  brew install ffmpeg\n'
+        '  Linux:  sudo apt install ffmpeg\n'
+        '  Windows: choco install ffmpeg',
+  );
 }

@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,6 +12,7 @@ import 'package:aleka/aleka_file.dart';
 import 'package:aleka/movie_controller.dart';
 import 'package:aleka/movie_timeline.dart';
 import 'package:aleka/video_export.dart';
+import 'package:aleka/video_export_web.dart';
 import 'package:image/image.dart' as img;
 
 /// Helper: builds a MaterialApp wrapping a PaintToolbar for isolated testing.
@@ -593,6 +595,41 @@ void main() {
       expect(bytes, isNull);
     });
 
+    test('ByteData buffer extraction uses correct offset and length', () {
+      // Simulate the case where ByteData is a view into a larger buffer —
+      // exactly what happens on web where the CanvasKit surface buffer is
+      // shared across multiple paint operations.
+      final png = _encodeMinimalPng(0, 128, 255);
+      // A buffer larger than the PNG, with garbage at the start.
+      final buffer = Uint8List(png.length + 20);
+      buffer[0] = 0xFF;
+      buffer[1] = 0xFE;
+      buffer[2] = 0xFD;
+      // The PNG data sits at offset 20.
+      buffer.setAll(20, png);
+
+      final byteData = ByteData.view(buffer.buffer, 20, png.length);
+
+      // OLD bug: asUint8List() without parameters reads from offset 0.
+      final oldWay = byteData.buffer.asUint8List();
+      expect(oldWay[0], 0xFF, reason: 'old way reads garbage at offset 0');
+      expect(oldWay[1], 0xFE);
+      // This would fail to decode because of the garbage prefix.
+      expect(img.decodePng(oldWay), isNull,
+          reason: 'garbage prefix makes it invalid PNG');
+
+      // FIXED: asUint8List(offsetInBytes, lengthInBytes).
+      final newWay = byteData.buffer.asUint8List(
+        byteData.offsetInBytes,
+        byteData.lengthInBytes,
+      );
+      expect(newWay[0], png[0], reason: 'starts at PNG magic byte');
+      expect(newWay.length, png.length,
+          reason: 'exact PNG data length');
+      expect(img.decodePng(newWay), isNotNull,
+          reason: 'valid PNG that decodes correctly');
+    });
+
     testWidgets('export icon is visible in full app', (tester) async {
       await tester.pumpWidget(const AlekaApp());
       expect(find.byIcon(Icons.image), findsOneWidget);
@@ -677,16 +714,26 @@ void main() {
       await tester.pumpAndSettle();
 
       // Save.
+      await tester.ensureVisible(find.byIcon(Icons.save));
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.save));
       await tester.pumpAndSettle();
       expect(find.text('Saved as .aleka'), findsOneWidget);
       expect(saved, isNotNull);
 
+      // Let save snackbar dismiss (2 s) so it doesn't block the load tap.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
       // Clear.
+      await tester.ensureVisible(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.delete_outline));
       await tester.pumpAndSettle();
 
       // Load.
+      await tester.ensureVisible(find.byIcon(Icons.folder_open));
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.folder_open));
       await tester.pumpAndSettle();
       expect(find.textContaining('Loaded 2 strokes'), findsOneWidget);
@@ -764,11 +811,21 @@ void main() {
       await tester.pumpAndSettle();
 
       // Save.
+      await tester.ensureVisible(find.byIcon(Icons.save));
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.save));
       await tester.pumpAndSettle();
 
+      // Let save snackbar dismiss so it doesn't block the load tap.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
       // Clear and load back.
+      await tester.ensureVisible(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byIcon(Icons.folder_open));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.folder_open));
       await tester.pumpAndSettle();
@@ -1193,22 +1250,23 @@ void main() {
   // Video export tests
   // -------------------------------------------------------------------------
   group('Video export', () {
-    test('empty frames returns null', () async {
+    test('empty frames returns error', () async {
       final result = await encodeVideo(pngFrames: [], delaysMs: [], fps: 12);
-      expect(result, isNull);
+      expect(result.bytes, isNull);
+      expect(result.error, isNotNull);
     });
 
-    test('non-empty frames with no ffmpeg returns null on desktop', () async {
+    test('non-empty frames with no ffmpeg returns error', () async {
       final redPng = _encodeMinimalPng(255, 0, 0);
-      // On desktop without ffmpeg, this returns null.
-      // On web, it would try ffmpeg.wasm (not available in tests).
       final result = await encodeVideo(
         pngFrames: [redPng],
         delaysMs: [500],
         fps: 12,
       );
-      // In test environment (no ffmpeg, no browser), returns null.
-      expect(result, isNull);
+      // Without ffmpeg installed (desktop) or ffmpeg.wasm loaded (web),
+      // bytes is null and error is set.
+      expect(result.bytes, isNull);
+      expect(result.error, isNotNull);
     });
   });
 
@@ -1428,6 +1486,469 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
+  // Video creation UI tests — full end-to-end flow
+  // -------------------------------------------------------------------------
+  group('Video creation UI', () {
+    final fakePng = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    final fakeWebm = Uint8List.fromList([0x1A, 0x45, 0xDF, 0xA3]); // EBML header
+
+    /// Returns the add-frame button finder, which differs between empty- and
+    /// non-empty timeline states. The colour picker also uses [Icons.add], so
+    /// we scope the search to the [MovieTimeline] subtree.
+    Finder addFrameBtn() {
+      // When no frames exist the timeline shows IconButton.filled(Icons.add).
+      // When frames exist it shows IconButton(Icons.add_circle_outline).
+      final filled = find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add),
+      );
+      if (filled.evaluate().isNotEmpty) return filled;
+      return find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add_circle_outline),
+      );
+    }
+
+    /// Pumps the test clock through the video-export async delays.
+    /// The export loop has a [Future.delayed] per frame (200ms web, 50ms
+    /// desktop), plus [WidgetsBinding.instance.endOfFrame] — we pump
+    /// generously to cover both platforms.
+    Future<void> pumpExport(WidgetTester tester, {int frameCount = 1}) async {
+      // Web: 200ms delay per frame + endOfFrame.  Desktop: 50ms per frame.
+      // Pump enough 100ms ticks to cover all frames plus encode + snackbar.
+      final pumpsPerFrame = kIsWeb ? 5 : 2;
+      for (var i = 0; i < frameCount * pumpsPerFrame + 3; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    testWidgets('add frame button adds a frame', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // The empty-state add button should be visible inside MovieTimeline.
+      final addBtn = find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add),
+      );
+      expect(addBtn, findsOneWidget);
+
+      // Tap it.
+      await tester.tap(addBtn);
+      await tester.pumpAndSettle();
+
+      // Should show "Frame 1 added."
+      expect(find.text('Frame 1 added.'), findsOneWidget);
+      // Should render frame thumbnail "1".
+      expect(find.text('1'), findsOneWidget);
+    });
+
+    testWidgets('export with one frame calls capture and encode',
+        (tester) async {
+      int captureCount = 0;
+      bool encodeCalled = false;
+      int pngCount = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async {
+            captureCount++;
+            return fakePng;
+          },
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            encodeCalled = true;
+            pngCount = pngFrames.length;
+            return (bytes: null, error: 'ffmpeg not found'); // Simulate ffmpeg not found.
+          },
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add a frame.
+      await tester.tap(addFrameBtn());
+      await tester.pumpAndSettle();
+
+      // Draw on it.
+      final gesture = await tester.startGesture(const Offset(100, 300));
+      await tester.pump();
+      await gesture.moveBy(const Offset(40, 30));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Export.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester);
+
+      // Capture and encode should have been called.
+      expect(captureCount, greaterThanOrEqualTo(1));
+      expect(encodeCalled, isTrue);
+      expect(pngCount, 1);
+    });
+
+    testWidgets('export with no frames shows warning', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async => fakePng,
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Click export without adding any frames.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester);
+
+      expect(find.text('Nothing to export — no frames in timeline.'), findsOneWidget);
+    });
+
+    testWidgets('export captures each frame exactly once per frame',
+        (tester) async {
+      int captureCount = 0;
+      int encodePngCount = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async {
+            captureCount++;
+            return fakePng;
+          },
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            encodePngCount = pngFrames.length;
+            return (bytes: fakeWebm, error: null);
+          },
+          saveVideoOverride: (bytes) async => true,
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add 3 frames, drawing on each.
+      for (var i = 0; i < 3; i++) {
+        await tester.tap(addFrameBtn());
+        await tester.pumpAndSettle();
+
+        final gesture = await tester.startGesture(
+          Offset(100.0 + i * 30, 300.0),
+        );
+        await tester.pump();
+        await gesture.moveBy(const Offset(40, 30));
+        await tester.pump();
+        await gesture.up();
+        await tester.pumpAndSettle();
+      }
+
+      // Click export.
+      final lastCount = captureCount;
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester, frameCount: 3);
+
+      // Should have captured 3 frames (one per frame in the timeline).
+      expect(captureCount - lastCount, 3);
+      expect(encodePngCount, 3);
+    });
+
+    testWidgets('export with mocked encode calls saveVideo with video bytes',
+        (tester) async {
+      Uint8List? savedBytes;
+      bool encodeCalled = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async => fakePng,
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            encodeCalled = true;
+            return (bytes: fakeWebm, error: null);
+          },
+          saveVideoOverride: (bytes) async {
+            savedBytes = bytes;
+            return true;
+          },
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add a frame.
+      await tester.tap(addFrameBtn());
+      await tester.pumpAndSettle();
+
+      // Draw on it.
+      final gesture = await tester.startGesture(const Offset(100, 300));
+      await tester.pump();
+      await gesture.moveBy(const Offset(40, 30));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Export.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester);
+
+      // The encode and save callbacks should have been called.
+      expect(encodeCalled, isTrue);
+      expect(savedBytes, isNotNull);
+      expect(savedBytes, equals(fakeWebm));
+    });
+
+    testWidgets('export with failed capture does not call encode or save',
+        (tester) async {
+      bool encodeCalled = false;
+      bool saveCalled = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async => null, // All captures fail.
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            encodeCalled = true;
+            return (bytes: fakeWebm, error: null);
+          },
+          saveVideoOverride: (bytes) async {
+            saveCalled = true;
+            return true;
+          },
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add a frame.
+      await tester.tap(addFrameBtn());
+      await tester.pumpAndSettle();
+
+      // Draw.
+      final gesture = await tester.startGesture(const Offset(100, 300));
+      await tester.pump();
+      await gesture.moveBy(const Offset(40, 30));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Export.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester);
+
+      // Capture returns null → frameImages is empty → encode and save NOT called.
+      expect(encodeCalled, isFalse);
+      expect(saveCalled, isFalse);
+    });
+
+    testWidgets('export saves current canvas to frame before rendering',
+        (tester) async {
+      int captureCount = 0;
+      bool encodeCalled = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async {
+            captureCount++;
+            return fakePng;
+          },
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            encodeCalled = true;
+            return (bytes: fakeWebm, error: null);
+          },
+          saveVideoOverride: (bytes) async => true,
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add a frame.
+      await tester.tap(addFrameBtn());
+      await tester.pumpAndSettle();
+
+      // Draw on it.
+      final gesture = await tester.startGesture(const Offset(100, 300));
+      await tester.pump();
+      await gesture.moveBy(const Offset(40, 30));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Export — this should save canvas, then capture the frame.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester);
+
+      // With 1 frame, capture should be called and encode should succeed.
+      expect(captureCount, greaterThanOrEqualTo(1));
+      expect(encodeCalled, isTrue);
+    });
+
+    testWidgets(
+        'full movie workflow: produces video bytes via mocked export',
+        (tester) async {
+      Uint8List? outputBytes;
+
+      final redFrame = _encodeMinimalPng(255, 0, 0);
+      final blueFrame = _encodeMinimalPng(0, 0, 255);
+      int captureCallIndex = 0;
+
+      // Fake MP4 bytes (starts with ftyp box).
+      final fakeMp4 = Uint8List.fromList(
+        List.generate(256, (i) => i % 256),
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async {
+            final idx = captureCallIndex++;
+            return idx == 0 ? redFrame : blueFrame;
+          },
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            return (bytes: fakeMp4, error: null);
+          },
+          saveVideoOverride: (bytes) {
+            outputBytes = bytes;
+            return Future<bool>.value(true);
+          },
+        ),
+      ));
+
+      // 1. Switch to movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.videocam), findsOneWidget);
+      expect(find.byType(MovieTimeline), findsOneWidget);
+
+      // 2. Add two frames.
+      final emptyAddBtn = find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add),
+      );
+      expect(emptyAddBtn, findsOneWidget);
+      await tester.tap(emptyAddBtn);
+      await tester.pumpAndSettle();
+      expect(find.text('Frame 1 added.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      await tester.tap(addFrameBtn());
+      await tester.pumpAndSettle();
+      expect(find.text('Frame 2 added.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      // 3. Brush on frame one.
+      await tester.tap(find.text('1'));
+      await tester.pumpAndSettle();
+      final gesture1 = await tester.startGesture(const Offset(150, 300));
+      await tester.pump();
+      await gesture1.moveBy(const Offset(80, 50));
+      await tester.pump();
+      await gesture1.up();
+      await tester.pumpAndSettle();
+
+      // 4. Brush on frame two.
+      await tester.tap(find.text('2'));
+      await tester.pumpAndSettle();
+      final gesture2 = await tester.startGesture(const Offset(250, 250));
+      await tester.pump();
+      await gesture2.moveBy(const Offset(-60, 70));
+      await tester.pump();
+      await gesture2.up();
+      await tester.pumpAndSettle();
+
+      // 5. Export movie.
+      await tester.tap(find.byIcon(Icons.videocam));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      // 6. Verify the video was produced.
+      expect(outputBytes, isNotNull,
+          reason: 'Encoded video bytes should be non-null');
+      expect(outputBytes!.length, greaterThan(200),
+          reason: 'Video bytes should be larger than 200 bytes');
+      expect(outputBytes, equals(fakeMp4));
+
+      expect(captureCallIndex, 2,
+          reason: 'Should have captured exactly 2 frames');
+      expect(find.text('Exported as video (2 frames)'), findsOneWidget);
+      expect(find.textContaining('failed'), findsNothing);
+      expect(find.textContaining('could not'), findsNothing);
+    });
+
+    testWidgets('multiple frames export encodes correct frame count',
+        (tester) async {
+      int pngCount = 0;
+      int delaysCount = 0;
+      Uint8List? savedBytes;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          capturePngOverride: (key) async => fakePng,
+          videoEncodeOverride: (
+            {required pngFrames, required delaysMs, required fps}) async {
+            pngCount = pngFrames.length;
+            delaysCount = delaysMs.length;
+            return (bytes: fakeWebm, error: null);
+          },
+          saveVideoOverride: (bytes) async {
+            savedBytes = bytes;
+            return true;
+          },
+        ),
+      ));
+
+      // Enter movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+
+      // Add 4 frames, drawing on each.
+      for (var i = 0; i < 4; i++) {
+        await tester.tap(addFrameBtn());
+        await tester.pumpAndSettle();
+
+        final gesture = await tester.startGesture(
+          Offset(100.0 + i * 30, 300.0),
+        );
+        await tester.pump();
+        await gesture.moveBy(const Offset(40, 30));
+        await tester.pump();
+        await gesture.up();
+        await tester.pumpAndSettle();
+      }
+
+      // Export.
+      await tester.tap(find.byIcon(Icons.videocam));
+      await pumpExport(tester, frameCount: 4);
+
+      // Should have encoded 4 frames and saved the result.
+      expect(pngCount, 4);
+      expect(delaysCount, 4);
+      expect(savedBytes, isNotNull);
+      expect(savedBytes, equals(fakeWebm));
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Movie mode UI integration tests (mocked layers)
   // -------------------------------------------------------------------------
   group('Movie mode integration', () {
@@ -1483,16 +2004,195 @@ void main() {
       expect(find.byIcon(Icons.image), findsOneWidget);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Real browser rendering → capture → encode pipeline tests.
+  // These exercise the actual capturePng (RepaintBoundary.toImage) path that
+  // runs in the live app.  They need a real rendering engine (Chrome / macOS)
+  // — the software renderer in native testWidgets cannot run toImage().
+  // ---------------------------------------------------------------------------
+  group('Real frame capture → WebM encode', () {
+    testWidgets('capturePng produces valid decodable PNG on this platform',
+        (tester) async {
+      final key = GlobalKey();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: RepaintBoundary(
+            key: key,
+            child: Container(
+              color: const Color(0xFF8844CC),
+              width: 80,
+              height: 60,
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      final bytes = await capturePng(key, pixelRatio: 1.0);
+      expect(bytes, isNotNull,
+          reason: 'capturePng should return non-null PNG bytes');
+      expect(bytes!.length, greaterThan(50),
+          reason: 'PNG should be at least 50 bytes');
+
+      // The captured PNG must be decodable (regression test for the
+      // byteData.buffer.asUint8List offset/length fix).
+      final decoded = img.decodePng(bytes);
+      expect(decoded, isNotNull,
+          reason: 'captured PNG must be decodable by the image package');
+      expect(decoded!.width, 80);
+      expect(decoded.height, 60);
+      // Verify a pixel has the expected colour.
+      final pixel = decoded.getPixel(40, 30);
+      expect(pixel.r, 136);
+      expect(pixel.g, 68);
+      expect(pixel.b, 204);
+    });
+
+    testWidgets('encodeVideoWeb returns null in test env (no ffmpeg.wasm)',
+        (tester) async {
+      final key = GlobalKey();
+
+      // Capture two frames with different colours.
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: RepaintBoundary(
+            key: key,
+            child: Container(
+              color: const Color(0xFFFF0000),
+              width: 32,
+              height: 32,
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final redPng = await capturePng(key, pixelRatio: 1.0);
+      expect(redPng, isNotNull);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: RepaintBoundary(
+            key: key,
+            child: Container(
+              color: const Color(0xFF0000FF),
+              width: 32,
+              height: 32,
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final bluePng = await capturePng(key, pixelRatio: 1.0);
+      expect(bluePng, isNotNull);
+
+      // ffmpeg.wasm cannot load in test environments — returns error.
+      final result = await encodeVideoWeb(
+        [redPng!, bluePng!],
+        [500, 500],
+        12,
+      );
+
+      expect(result.bytes, isNull,
+          reason: 'encodeVideoWeb returns null bytes without ffmpeg.wasm');
+      expect(result.error, isNotNull);
+    });
+
+    testWidgets('full movie workflow with real capture fails without ffmpeg',
+        (tester) async {
+      Uint8List? outputBytes;
+
+      await tester.pumpWidget(MaterialApp(
+        home: PaintScreen(
+          // No overrides — use real capturePng + real encodeVideo.
+          saveVideoOverride: (bytes) {
+            outputBytes = bytes;
+            return Future<bool>.value(true);
+          },
+        ),
+      ));
+
+      // 1. Switch to movie mode.
+      await tester.tap(find.byIcon(Icons.movie));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.videocam), findsOneWidget);
+      expect(find.byType(MovieTimeline), findsOneWidget);
+
+      // 2. Add two frames.
+      final emptyAddBtn = find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add),
+      );
+      expect(emptyAddBtn, findsOneWidget);
+      await tester.tap(emptyAddBtn);
+      await tester.pumpAndSettle();
+      expect(find.text('Frame 1 added.'), findsOneWidget);
+      // Let snackbar dismiss so it does not block taps.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      // After first frame, the add button changes to add_circle_outline.
+      final addCircleBtn = find.descendant(
+        of: find.byType(MovieTimeline),
+        matching: find.byIcon(Icons.add_circle_outline),
+      );
+      await tester.tap(addCircleBtn);
+      await tester.pumpAndSettle();
+      expect(find.text('Frame 2 added.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      // 3. Draw on frame 1.
+      await tester.tap(find.text('1'));
+      await tester.pumpAndSettle();
+      final g1 = await tester.startGesture(const Offset(150, 300));
+      await tester.pump();
+      await g1.moveBy(const Offset(80, 50));
+      await tester.pump();
+      await g1.up();
+      await tester.pumpAndSettle();
+
+      // 4. Draw on frame 2.
+      await tester.tap(find.text('2'));
+      await tester.pumpAndSettle();
+      final g2 = await tester.startGesture(const Offset(250, 250));
+      await tester.pump();
+      await g2.moveBy(const Offset(-60, 70));
+      await tester.pump();
+      await g2.up();
+      await tester.pumpAndSettle();
+
+      // 5. Export — uses real capturePng + real encodeVideo.
+      // ffmpeg.wasm cannot load in test environments, so encode returns null.
+      await tester.tap(find.byIcon(Icons.videocam));
+      // On browser the export has 200 ms delays × 2 frames + encode time,
+      // so we pump generously with real async.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      // Pump past the "Rendering frames…" snackbar.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      // 6. Without ffmpeg, export fails — saveVideo should not be called.
+      expect(outputBytes, isNull,
+          reason: 'Without ffmpeg, saveVideo should not be called');
+      // The failure snackbar is shown.
+      expect(find.textContaining('Video export failed'),
+          findsOneWidget,
+          reason: 'Should show failure snackbar');
+    });
+  });
 }
 
-/// Creates a minimal 2×2 PNG image with the given RGB color.
+/// Creates a minimal 16×16 PNG image with the given RGB color.
 Uint8List _encodeMinimalPng(int r, int g, int b) {
-  final image = img.Image(width: 2, height: 2);
-  for (var y = 0; y < 2; y++) {
-    for (var x = 0; x < 2; x++) {
+  final image = img.Image(width: 16, height: 16);
+  for (var y = 0; y < 16; y++) {
+    for (var x = 0; x < 16; x++) {
       image.setPixelRgba(x, y, r, g, b, 255);
     }
   }
   return Uint8List.fromList(img.encodePng(image));
 }
+
 

@@ -32,8 +32,10 @@
   <title>aleka</title>
   <link rel="manifest" href="manifest.json">
 
-  <!-- ffmpeg.wasm for MP4 video export -->
-  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+  <!-- Video export on web uses ffmpeg.wasm (MP4/H.264); falls back to
+       pure-Dart dart_vp8 (WebM) if ffmpeg.wasm fails to load. -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"
+          crossorigin="anonymous" async></script>
 </head>
 <body>
   <!--

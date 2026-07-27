@@ -26,7 +26,7 @@ class AlekaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Aleka Paint',
+      title: 'Aleka',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -63,6 +63,7 @@ class PaintScreen extends StatefulWidget {
   final CapturePngFn? capturePngOverride;
   final SavePngFn? savePngOverride;
   final SaveVideoFn? saveVideoOverride;
+  final EncodeVideoFn? videoEncodeOverride;
 
   const PaintScreen({
     super.key,
@@ -71,6 +72,7 @@ class PaintScreen extends StatefulWidget {
     this.capturePngOverride,
     this.savePngOverride,
     this.saveVideoOverride,
+    this.videoEncodeOverride,
   });
 
   @override
@@ -278,9 +280,13 @@ class _PaintScreenState extends State<PaintScreen> {
       final frame = _movieController.frames[i];
       _loadFrameToCanvas(frame);
 
-      // Let the canvas repaint.
+      // Wait for the framework to schedule and paint a new frame.
       await WidgetsBinding.instance.endOfFrame;
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // On web, CanvasKit rasterisation is async — give it extra time
+      // before calling toImage() on the RepaintBoundary.
+      await Future<void>.delayed(Duration(
+        milliseconds: kIsWeb ? 200 : 50,
+      ));
 
       final pngBytes = await _captureFn(_canvasRepaintKey);
       if (pngBytes != null) {
@@ -297,12 +303,17 @@ class _PaintScreenState extends State<PaintScreen> {
     if (!mounted) return;
 
     if (frameImages.isEmpty) {
-      _showSnackBar('Export failed — could not capture frames.');
+      _showSnackBar(
+        'Export failed — could not capture frames '
+        '(0 of ${_movieController.frameCount} frames rendered).',
+        isError: true,
+      );
       return;
     }
 
-    // Encode to MP4 (desktop) or WebM (web) and save.
-    final videoBytes = await encodeVideo(
+    // Encode to MP4 (desktop / web) and save.
+    final encodeFn = widget.videoEncodeOverride ?? encodeVideo;
+    final (:bytes, :error) = await encodeFn(
       pngFrames: frameImages,
       delaysMs: delaysMs,
       fps: _movieController.fps,
@@ -310,16 +321,15 @@ class _PaintScreenState extends State<PaintScreen> {
 
     if (!mounted) return;
 
-    if (videoBytes == null) {
+    if (bytes == null) {
       _showSnackBar(
-        kIsWeb
-            ? 'Video export failed — see console for details.'
-            : 'Video export failed — is ffmpeg installed?',
+        'Video export failed — ${error ?? 'unknown error'}.',
+        isError: true,
       );
       return;
     }
 
-    final ok = await _saveVideoFn(videoBytes);
+    final ok = await _saveVideoFn(bytes);
     if (!mounted) return;
     _showSnackBar(
       ok
@@ -328,9 +338,13 @@ class _PaintScreenState extends State<PaintScreen> {
     );
   }
 
-  void _showSnackBar(String message) {
+  void _showSnackBar(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.red.shade700 : null,
+        duration: Duration(seconds: isError ? 4 : 2),
+      ),
     );
   }
 
